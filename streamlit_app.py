@@ -3,102 +3,102 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="DFA vs Self Down Payment", layout="wide")
+st.set_page_config(page_title="DFA vs Self Down Payment — Cashflow View", layout="wide")
 
-st.title("DFA vs Paying Down Payment Yourself — Take-home Equity at Sale")
-st.caption(
-    "Simplified comparison: (A) pay down payment yourself vs (B) use DFA and invest the replaced cash. "
-    "Mortgage, taxes, insurance, maintenance, PMI, and selling costs are excluded (assumed equal or ignored). "
-    "Optional: model margin leverage on the invested cash (adds borrowing cost and amplifies losses)."
-)
+# =========================
+# Core idea (kept simple)
+# =========================
+# In this simplified comparison (ignoring mortgage amortization/interest and selling costs),
+# both scenarios own the same house and have the same first mortgage payoff at sale.
+# The ONLY differences are:
+#   (1) DFA repayment at sale: DFA principal + share of positive appreciation
+#   (2) Investment growth on the cash DFA replaces (your cash not put into down payment)
+#
+# Therefore:
+#   DFA advantage = (InvestmentFuture) - (DFA Repayment)
+# House sale price cancels out in the comparison; we show it only for intuition.
 
 # -----------------------------
-# Helpers
+# Helper functions
 # -----------------------------
-def future_home_value(cost: float, h: float, t: int) -> float:
-    return cost * ((1 + h) ** t)
+def compute_future_sale_price(cost: float, home_rate: float, years: int) -> float:
+    return cost * ((1.0 + home_rate) ** years)
 
-def dfa_repayment(cost: float, t: int, h: float, dfa_assist: float, share_factor: float, cap_to_proceeds: bool) -> float:
-    fv = future_home_value(cost, h, t)
-    appreciation = max(fv - cost, 0.0)
-    dfa_share_pct = (dfa_assist / cost) if cost > 0 else 0.0
-    repay = dfa_assist + share_factor * dfa_share_pct * appreciation
-    if cap_to_proceeds:
-        repay = min(repay, fv)
-    return repay
+def compute_dfa_repayment(cost: float, years: int, home_rate: float, dfa_amount: float,
+                         share_factor: float, cap_to_sale_price: bool) -> dict:
+    sale_price = compute_future_sale_price(cost, home_rate, years)
+    appreciation = max(sale_price - cost, 0.0)
+    dfa_share_pct = (dfa_amount / cost) if cost > 0 else 0.0
+    appreciation_share = share_factor * dfa_share_pct * appreciation
+    repayment = dfa_amount + appreciation_share
+    if cap_to_sale_price:
+        repayment = min(repayment, sale_price)
+    return {
+        "sale_price": sale_price,
+        "appreciation": appreciation,
+        "dfa_share_pct": dfa_share_pct,
+        "appreciation_share": appreciation_share,
+        "repayment": repayment
+    }
 
-def investment_future_value(
+def compute_investment_future_value(
     principal: float,
-    t: int,
-    stock_r: float,
+    years: int,
+    stock_rate: float,
     use_margin: bool,
     leverage_multiple: float,
-    margin_rate: float
-) -> float:
+    margin_rate: float,
+) -> dict:
     """
-    If no margin:
-        principal*(1+stock_r)^t
-    If margin with leverage_multiple L:
-        invest_amount = principal * L
+    No margin:
+        future = principal*(1+stock_rate)^years
+    Margin with leverage_multiple L:
+        invest_amount = principal*L
         borrowed = invest_amount - principal
-        end_value = invest_amount*(1+stock_r)^t - borrowed*(1+margin_rate)^t
-    Note: can be negative (margin losses can exceed equity).
+        future = invest_amount*(1+stock_rate)^years - borrowed*(1+margin_rate)^years
+
+    Note: This can go negative (owing more than portfolio). This model does NOT simulate margin calls.
     """
     if principal <= 0:
-        return 0.0
+        return {"invest_amount": 0.0, "borrowed": 0.0, "future": 0.0, "interest_cost": 0.0}
 
     if not use_margin or leverage_multiple <= 1.0:
-        return principal * ((1 + stock_r) ** t)
+        future = principal * ((1.0 + stock_rate) ** years)
+        return {"invest_amount": principal, "borrowed": 0.0, "future": future, "interest_cost": 0.0}
 
     L = leverage_multiple
     invest_amount = principal * L
     borrowed = invest_amount - principal
 
-    return invest_amount * ((1 + stock_r) ** t) - borrowed * ((1 + margin_rate) ** t)
+    future_portfolio = invest_amount * ((1.0 + stock_rate) ** years)
+    future_debt = borrowed * ((1.0 + margin_rate) ** years)
+    future = future_portfolio - future_debt
 
-def advantage(
-    cost: float,
-    t: int,
-    h: float,
-    s: float,
-    dfa_assist: float,
-    share_factor: float,
-    cap_to_proceeds: bool,
-    cash_invested: float,
-    use_margin: bool,
-    leverage_multiple: float,
-    margin_rate: float
-) -> float:
-    """
-    DFA advantage in this simplified model is:
-        InvestmentFuture - DFA_repayment
-    because the house sale price itself cancels out between scenarios.
-    """
-    repay = dfa_repayment(cost, t, h, dfa_assist, share_factor, cap_to_proceeds)
-    inv = investment_future_value(cash_invested, t, s, use_margin, leverage_multiple, margin_rate)
-    return inv - repay
+    interest_cost = future_debt - borrowed
+    return {"invest_amount": invest_amount, "borrowed": borrowed, "future": future, "interest_cost": interest_cost}
 
-def solve_break_even_stock(
-    cost: float, t: int, h: float,
-    dfa_assist: float, share_factor: float, cap_to_proceeds: bool,
+def compute_advantage(investment_future: float, dfa_repayment: float) -> float:
+    # In this simplified model, all other house cashflows cancel out.
+    return investment_future - dfa_repayment
+
+def break_even_stock_return_bisect(
+    cost: float, years: int, home_rate: float,
+    dfa_amount: float, share_factor: float, cap_to_sale_price: bool,
     cash_invested: float,
     use_margin: bool, leverage_multiple: float, margin_rate: float,
-    lo: float = -0.95, hi: float = 1.50, max_iter: int = 80
+    lo: float = -0.95, hi: float = 1.50, max_iter: int = 90
 ):
-    """
-    Find stock return s such that advantage(...) == 0 using bisection.
-    Monotonic in s for typical ranges.
-    Returns None if it cannot bracket a root.
-    """
     if cash_invested <= 0:
         return None
 
-    f_lo = advantage(cost, t, h, lo, dfa_assist, share_factor, cap_to_proceeds,
-                     cash_invested, use_margin, leverage_multiple, margin_rate)
-    f_hi = advantage(cost, t, h, hi, dfa_assist, share_factor, cap_to_proceeds,
-                     cash_invested, use_margin, leverage_multiple, margin_rate)
+    dfa = compute_dfa_repayment(cost, years, home_rate, dfa_amount, share_factor, cap_to_sale_price)
+    target = dfa["repayment"]
 
-    # Need opposite signs to bracket
+    def f(s):
+        inv = compute_investment_future_value(cash_invested, years, s, use_margin, leverage_multiple, margin_rate)["future"]
+        return inv - target
+
+    f_lo, f_hi = f(lo), f(hi)
     if f_lo == 0:
         return lo
     if f_hi == 0:
@@ -107,86 +107,80 @@ def solve_break_even_stock(
         return None
 
     a, b = lo, hi
-    fa, fb = f_lo, f_hi
     for _ in range(max_iter):
         m = (a + b) / 2
-        fm = advantage(cost, t, h, m, dfa_assist, share_factor, cap_to_proceeds,
-                       cash_invested, use_margin, leverage_multiple, margin_rate)
+        fm = f(m)
         if abs(fm) < 1e-6:
             return m
-        # keep the bracket
-        if fa * fm <= 0:
-            b, fb = m, fm
+        if f_lo * fm <= 0:
+            b, f_hi = m, fm
         else:
-            a, fa = m, fm
+            a, f_lo = m, fm
     return (a + b) / 2
 
-def solve_break_even_home(
-    cost: float, t: int, s: float,
-    dfa_assist: float, share_factor: float, cap_to_proceeds: bool,
+def break_even_home_return_bisect(
+    cost: float, years: int, stock_rate: float,
+    dfa_amount: float, share_factor: float, cap_to_sale_price: bool,
     cash_invested: float,
     use_margin: bool, leverage_multiple: float, margin_rate: float,
-    lo: float = -0.50, hi: float = 0.25, max_iter: int = 80
+    lo: float = -0.50, hi: float = 0.25, max_iter: int = 90
 ):
-    """
-    Find home appreciation h such that advantage(...) == 0 using bisection.
-    Advantage decreases as h increases (because repayment increases with appreciation).
-    Returns None if it cannot bracket a root.
-    """
-    f_lo = advantage(cost, t, lo, s, dfa_assist, share_factor, cap_to_proceeds,
-                     cash_invested, use_margin, leverage_multiple, margin_rate)
-    f_hi = advantage(cost, t, hi, s, dfa_assist, share_factor, cap_to_proceeds,
-                     cash_invested, use_margin, leverage_multiple, margin_rate)
+    dfa_amount = float(dfa_amount)
 
-    if f_lo == 0:
+    def g(h):
+        dfa = compute_dfa_repayment(cost, years, h, dfa_amount, share_factor, cap_to_sale_price)
+        inv = compute_investment_future_value(cash_invested, years, stock_rate, use_margin, leverage_multiple, margin_rate)["future"]
+        return inv - dfa["repayment"]
+
+    g_lo, g_hi = g(lo), g(hi)
+    if g_lo == 0:
         return lo
-    if f_hi == 0:
+    if g_hi == 0:
         return hi
-    if f_lo * f_hi > 0:
+    if g_lo * g_hi > 0:
         return None
 
     a, b = lo, hi
-    fa, fb = f_lo, f_hi
     for _ in range(max_iter):
         m = (a + b) / 2
-        fm = advantage(cost, t, m, s, dfa_assist, share_factor, cap_to_proceeds,
-                       cash_invested, use_margin, leverage_multiple, margin_rate)
-        if abs(fm) < 1e-6:
+        gm = g(m)
+        if abs(gm) < 1e-6:
             return m
-        if fa * fm <= 0:
-            b, fb = m, fm
+        if g_lo * gm <= 0:
+            b, g_hi = m, gm
         else:
-            a, fa = m, fm
+            a, g_lo = m, gm
     return (a + b) / 2
 
 # -----------------------------
-# Sidebar inputs (order updated)
+# UI
 # -----------------------------
-DEFAULT_HOME_APPRECIATION = 0.04
-DEFAULT_STOCK_RETURN = 0.07
-DEFAULT_MARGIN_RATE = 0.09
+st.title("DFA vs Self Down Payment — Clean Cashflow Comparison")
+st.caption(
+    "This tool avoids the confusing idea that DFA is 'owning X% of your home'. "
+    "Instead, it treats DFA as a **repayment at exit**: principal + a share of positive appreciation."
+)
 
 with st.sidebar:
     st.header("Inputs")
 
     purchase_cost = st.number_input(
-        "All-in home cost (purchase price + any acquisition costs you include)",
+        "All-in home cost ($)",
         min_value=1_000.0, value=1_000_000.0, step=10_000.0, format="%.0f"
     )
 
-    st.subheader("Market assumptions (annual rates as decimals)")
+    st.subheader("Market assumptions (annual, decimals)")
     home_app_rate = st.number_input(
-        "Home appreciation rate h (e.g., 0.04 = 4%)",
-        min_value=-0.20, max_value=0.25, value=DEFAULT_HOME_APPRECIATION, step=0.005, format="%.3f"
+        "Home appreciation rate h (0.04 = 4%)",
+        min_value=-0.20, max_value=0.25, value=0.04, step=0.005, format="%.3f"
     )
     stock_rate = st.number_input(
-        "Stock return rate s (e.g., 0.07 = 7%)",
-        min_value=-0.95, max_value=1.50, value=DEFAULT_STOCK_RETURN, step=0.005, format="%.3f"
+        "Stock return rate s (0.07 = 7%)",
+        min_value=-0.95, max_value=1.50, value=0.07, step=0.005, format="%.3f"
     )
-
     years = st.slider("Years until sale", min_value=1, max_value=40, value=7, step=1)
 
-    st.subheader("Your planned down payment capital")
+    st.subheader("Down payment plan")
     dp_target_pct = st.slider(
         "Target down payment (%)",
         min_value=0.0, max_value=50.0, value=20.0, step=0.5
@@ -194,212 +188,194 @@ with st.sidebar:
 
     st.subheader("DFA parameters (simplified)")
     dfa_max_pct = st.slider(
-        "DFA max % of cost",
+        "DFA max % of home cost",
         min_value=0.0, max_value=30.0, value=20.0, step=0.5
     ) / 100.0
-
     dfa_cap_amount = st.number_input(
         "DFA cap ($)",
         min_value=0.0, value=150_000.0, step=5_000.0, format="%.0f"
     )
-
     share_factor = st.slider(
-        "Appreciation share factor (1.0 = standard; <1.0 = reduced-share)",
+        "Share factor (1.0 standard; <1 reduced share)",
         min_value=0.0, max_value=1.5, value=1.0, step=0.05
     )
 
-    st.subheader("Leverage option: margin on invested cash")
-    use_margin = st.checkbox(
-        "Use margin leverage for the invested cash (higher risk)",
-        value=False
-    )
+    st.subheader("Investing leverage option")
+    use_margin = st.checkbox("Use margin leverage on invested cash", value=False)
     leverage_multiple = st.slider(
-        "Leverage multiple (1.0 = none, 2.0 ≈ 50% initial margin)",
+        "Leverage multiple (1.0 to 2.0)",
         min_value=1.0, max_value=2.0, value=1.0, step=0.05, disabled=not use_margin
     )
     margin_rate = st.number_input(
         "Margin borrowing rate (annual, decimal)",
-        min_value=0.00, max_value=0.50, value=DEFAULT_MARGIN_RATE, step=0.005, format="%.3f",
+        min_value=0.0, max_value=0.50, value=0.09, step=0.005, format="%.3f",
         disabled=not use_margin
     )
 
-    st.subheader("Optional realism toggle")
-    cap_repayment_to_sale_proceeds = st.checkbox(
-        "Cap DFA repayment to sale proceeds",
+    st.subheader("Optional")
+    cap_repayment_to_sale_price = st.checkbox(
+        "Cap DFA repayment to sale price (avoids impossible negative proceeds)",
         value=True
     )
 
 # -----------------------------
-# Core scenario calculations
+# Compute baseline quantities
 # -----------------------------
 starting_equity = purchase_cost * dp_target_pct
+first_mortgage = purchase_cost - starting_equity  # simplifying assumption: same in both scenarios
 
-dfa_assist = min(purchase_cost * dfa_max_pct, dfa_cap_amount)
-cash_to_house_with_dfa = max(starting_equity - dfa_assist, 0.0)
-cash_invested = min(starting_equity, dfa_assist)
+dfa_amount = min(purchase_cost * dfa_max_pct, dfa_cap_amount)
 
-fv = future_home_value(purchase_cost, home_app_rate, years)
-repay = dfa_repayment(purchase_cost, years, home_app_rate, dfa_assist, share_factor, cap_repayment_to_sale_proceeds)
-sale_proceeds_self = fv
-sale_proceeds_dfa = fv - repay
+cash_needed_with_dfa = max(starting_equity - dfa_amount, 0.0)
+cash_invested = min(starting_equity, dfa_amount)
 
-inv_future = investment_future_value(cash_invested, years, stock_rate, use_margin, leverage_multiple, margin_rate)
+dfa = compute_dfa_repayment(purchase_cost, years, home_app_rate, dfa_amount, share_factor, cap_repayment_to_sale_price)
+inv = compute_investment_future_value(cash_invested, years, stock_rate, use_margin, leverage_multiple, margin_rate)
 
-take_home_self = sale_proceeds_self
-take_home_dfa = sale_proceeds_dfa + inv_future
+dfa_adv = compute_advantage(inv["future"], dfa["repayment"])
 
-profit_self = take_home_self - starting_equity
-profit_dfa = take_home_dfa - starting_equity
+# =========================
+# 1) Rewrite UI language: no "% equity" framing
+# =========================
+st.subheader("Inputs summary (what you’re actually doing)")
+row1, row2, row3, row4 = st.columns(4)
+row1.metric("Starting equity (your down payment plan)", f"${starting_equity:,.0f}")
+row2.metric("First mortgage (assumed constant)", f"${first_mortgage:,.0f}")
+row3.metric("DFA amount used", f"${dfa_amount:,.0f}")
+row4.metric("Years to sale", f"{years}")
 
-dfa_advantage = profit_dfa - profit_self  # equals inv_future - repay
-
-# -----------------------------
-# Display: starting equity
-# -----------------------------
-st.subheader("Starting equity")
-st.metric("Starting equity (your down payment capital)", f"${starting_equity:,.0f}")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("DFA assistance used", f"${dfa_assist:,.0f}")
-c2.metric("Cash you still put into house with DFA", f"${cash_to_house_with_dfa:,.0f}")
-c3.metric("Cash invested (replaced by DFA)", f"${cash_invested:,.0f}")
+row5, row6, row7 = st.columns(3)
+row5.metric("Your cash into down payment (with DFA)", f"${cash_needed_with_dfa:,.0f}")
+row6.metric("Cash DFA replaces (invested)", f"${cash_invested:,.0f}")
+row7.metric("DFA share % (approx = DFA/home)", f"{dfa['dfa_share_pct']*100:.1f}%")
 
 if use_margin:
     st.warning(
-        "Margin leverage can amplify losses and can lead to outcomes where investment value is negative "
-        "(owing more than the portfolio). This simplified model includes borrowing cost but does not model margin calls."
+        "Margin leverage is risky. This model includes borrowing cost but does NOT model margin calls/forced liquidation."
     )
 
 st.divider()
 
-# -----------------------------
-# Display: at sale framing
-# -----------------------------
-st.subheader(f"At sale after {years} years (take-home framing)")
+# =========================
+# 2) Refactor to a single clean equation + show cash timeline
+# =========================
+st.subheader("Clean cashflow equation (this is the whole comparison)")
 
-a, b = st.columns(2)
-with a:
-    st.markdown("### Pay down payment yourself")
-    st.metric("Sale proceeds (from house)", f"${sale_proceeds_self:,.0f}")
-    st.metric("Profit vs starting equity", f"${profit_self:,.0f}")
+st.markdown(
+    """
+### DFA advantage at sale
+Because both scenarios own the same house and have the same first mortgage in this simplified model, the house cashflows cancel out.
 
-with b:
-    st.markdown("### Use DFA + invest replaced cash")
-    st.metric("Sale proceeds after DFA repayment", f"${sale_proceeds_dfa:,.0f}")
-    st.metric("Investment value at sale", f"${inv_future:,.0f}")
-    st.metric("Total take-home at sale", f"${take_home_dfa:,.0f}")
-    st.metric("Profit vs starting equity", f"${profit_dfa:,.0f}")
+**So the only comparison is:**
 
-st.divider()
+**DFA advantage = (Investment value at sale) − (DFA repayment at sale)**
 
-st.subheader("Decision")
-st.metric("DFA advantage (Profit DFA − Profit Self)", f"${dfa_advantage:,.0f}")
+- If this number is **positive**, using DFA + investing the replaced cash wins.
+- If **negative**, paying the down payment yourself wins.
+"""
+)
 
-if dfa_advantage > 0:
-    st.success("Under these assumptions, DFA + investing the replaced cash is better.")
-elif dfa_advantage < 0:
-    st.warning("Under these assumptions, paying the down payment yourself is better.")
+eq1, eq2, eq3 = st.columns(3)
+eq1.metric("Investment value at sale", f"${inv['future']:,.0f}")
+eq2.metric("DFA repayment at sale", f"${dfa['repayment']:,.0f}")
+eq3.metric("DFA advantage", f"${dfa_adv:,.0f}")
+
+if dfa_adv > 0:
+    st.success("Result: DFA + investing wins under these assumptions.")
+elif dfa_adv < 0:
+    st.warning("Result: Paying the down payment yourself wins under these assumptions.")
 else:
-    st.info("Under these assumptions, they are break-even.")
+    st.info("Result: Break-even under these assumptions.")
 
-with st.expander("Why it’s NOT just 'home return = stock return'"):
+with st.expander("Cash timeline view (makes it intuitive)"):
+    # Timeline is shown in $ terms, not ownership terms.
+    st.markdown("#### Time 0 (purchase)")
+    st.write(f"- You have **${starting_equity:,.0f}** of down payment capital.")
+    st.write(f"- With DFA, you put **${cash_needed_with_dfa:,.0f}** into the house and invest **${cash_invested:,.0f}**.")
+
+    st.markdown(f"#### Time {years} (sale)")
+    st.write(f"- Home sells for **${dfa['sale_price']:,.0f}** (modelled).")
+    st.write(f"- You pay off first mortgage: **${first_mortgage:,.0f}** (assumed unchanged).")
     st.write(
-        """
-The break-even condition compares **dollars**, not just rates:
-
-**Break-even:** InvestmentFuture = DFA Repayment
-
-- DFA repayment depends on **DFA principal + share of *positive* home appreciation**, which depends on the home return AND how big the DFA assistance is (cap matters).
-- InvestmentFuture depends on **how much cash DFA replaces**, the stock return, years held, and (optionally) margin borrowing cost.
-
-So the tipping point is generally **not** when home return equals stock return.
-        """
+        f"- DFA repayment: **${dfa_amount:,.0f} principal + ${dfa['appreciation_share']:,.0f} appreciation share = "
+        f"${dfa['repayment']:,.0f}**"
     )
+    if use_margin and inv["borrowed"] > 0:
+        st.write(
+            f"- Investment uses margin: invest ${inv['invest_amount']:,.0f} with ${inv['borrowed']:,.0f} borrowed; "
+            f"interest cost over time ≈ ${inv['interest_cost']:,.0f} (compounded)."
+        )
+    st.write(f"- Investment value at sale: **${inv['future']:,.0f}**")
 
-# -----------------------------
-# Tipping points
-# -----------------------------
-st.subheader("Tipping points (when DFA becomes better)")
+st.divider()
 
-be_stock = solve_break_even_stock(
-    cost=purchase_cost, t=years, h=home_app_rate,
-    dfa_assist=dfa_assist, share_factor=share_factor, cap_to_proceeds=cap_repayment_to_sale_proceeds,
+# =========================
+# Tipping points (not just "equal rates")
+# =========================
+st.subheader("Tipping points (solve for the break-even rate)")
+
+be_stock = break_even_stock_return_bisect(
+    cost=purchase_cost, years=years, home_rate=home_app_rate,
+    dfa_amount=dfa_amount, share_factor=share_factor, cap_to_sale_price=cap_repayment_to_sale_price,
     cash_invested=cash_invested,
     use_margin=use_margin, leverage_multiple=leverage_multiple, margin_rate=margin_rate
 )
-
-be_home = solve_break_even_home(
-    cost=purchase_cost, t=years, s=stock_rate,
-    dfa_assist=dfa_assist, share_factor=share_factor, cap_to_proceeds=cap_repayment_to_sale_proceeds,
+be_home = break_even_home_return_bisect(
+    cost=purchase_cost, years=years, stock_rate=stock_rate,
+    dfa_amount=dfa_amount, share_factor=share_factor, cap_to_sale_price=cap_repayment_to_sale_price,
     cash_invested=cash_invested,
     use_margin=use_margin, leverage_multiple=leverage_multiple, margin_rate=margin_rate
 )
 
 tp1, tp2 = st.columns(2)
-
 with tp1:
-    st.markdown("#### Required stock return (given home return)")
+    st.markdown("#### Break-even stock return (given home return)")
     if cash_invested <= 0:
-        st.write("Not applicable: cash invested is $0 (DFA is not replacing any of your down payment).")
+        st.write("Not applicable: DFA is not replacing any of your down payment (cash invested = $0).")
     elif be_stock is None:
         st.write("Could not find a break-even stock return in the search range. Try different inputs.")
     else:
-        st.write(
-            f"Break-even stock return ≈ **{be_stock*100:.2f}%/yr**. "
-            f"DFA tends to be better if your stock return is **above** this (holding home return fixed)."
-        )
+        st.write(f"Break-even stock return ≈ **{be_stock*100:.2f}% / year**.")
+        st.write("DFA tends to be better if the **stock return is above** this (holding home return fixed).")
 
 with tp2:
-    st.markdown("#### Required home appreciation (given stock return)")
+    st.markdown("#### Break-even home appreciation (given stock return)")
     if be_home is None:
         st.write("Could not find a break-even home appreciation rate in the search range. Try different inputs.")
     else:
-        st.write(
-            f"Break-even home appreciation ≈ **{be_home*100:.2f}%/yr**. "
-            f"DFA tends to be better if home appreciation is **below** this (holding stock return fixed)."
-        )
+        st.write(f"Break-even home appreciation ≈ **{be_home*100:.2f}% / year**.")
+        st.write("DFA tends to be better if the **home appreciation is below** this (holding stock return fixed).")
 
-# -----------------------------
-# Sensitivity table (selected years)
-# -----------------------------
+# =========================
+# Sensitivity table (years)
+# =========================
 st.divider()
 st.subheader("Sensitivity table (selected years)")
 
 T = np.arange(1, 41)
 
-fv_series = purchase_cost * ((1 + home_app_rate) ** T)
-app_series = np.maximum(fv_series - purchase_cost, 0.0)
+sale_prices = purchase_cost * ((1.0 + home_app_rate) ** T)
+appreciations = np.maximum(sale_prices - purchase_cost, 0.0)
 
-dfa_share_pct = (dfa_assist / purchase_cost) if purchase_cost > 0 else 0.0
-repay_series = dfa_assist + share_factor * dfa_share_pct * app_series
-if cap_repayment_to_sale_proceeds:
-    repay_series = np.minimum(repay_series, fv_series)
+dfa_share_pct = (dfa_amount / purchase_cost) if purchase_cost > 0 else 0.0
+repayments = dfa_amount + share_factor * dfa_share_pct * appreciations
+if cap_repayment_to_sale_price:
+    repayments = np.minimum(repayments, sale_prices)
 
-sale_dfa_series = fv_series - repay_series
+# Investment series
+inv_values = np.array([
+    compute_investment_future_value(cash_invested, int(t), stock_rate, use_margin, leverage_multiple, margin_rate)["future"]
+    for t in T
+])
 
-# Investment series (with or without margin)
-inv_series = []
-for t in T:
-    inv_series.append(
-        investment_future_value(cash_invested, int(t), stock_rate, use_margin, leverage_multiple, margin_rate)
-    )
-inv_series = np.array(inv_series)
-
-take_self_series = fv_series
-take_dfa_series = sale_dfa_series + inv_series
-
-profit_self_series = take_self_series - starting_equity
-profit_dfa_series = take_dfa_series - starting_equity
-adv_series = profit_dfa_series - profit_self_series  # = inv_series - repay_series
+advantages = inv_values - repayments  # clean identity
 
 df = pd.DataFrame({
     "Year": T,
-    "Self: Sale Proceeds": take_self_series,
-    "DFA: Sale Proceeds After Repay": sale_dfa_series,
-    "DFA: Investment Value": inv_series,
-    "Self: Profit vs Start": profit_self_series,
-    "DFA: Profit vs Start": profit_dfa_series,
-    "DFA Advantage": adv_series
+    "Home Sale Price": sale_prices,
+    "DFA Repayment": repayments,
+    "Investment Value": inv_values,
+    "DFA Advantage (Investment - Repayment)": advantages
 })
 
 st.dataframe(
@@ -407,19 +383,19 @@ st.dataframe(
     use_container_width=True
 )
 
-# -----------------------------
-# Plot at the very end (as requested)
-# -----------------------------
+# =========================
+# 3) Plot at the end (as requested)
+# =========================
 st.subheader("Plot: DFA advantage vs time to sale")
 
 fig = plt.figure()
-plt.plot(df["Year"], df["DFA Advantage"])
+plt.plot(df["Year"], df["DFA Advantage (Investment - Repayment)"])
 plt.axhline(0)
 plt.xlabel("Years to sale")
 plt.ylabel("DFA Advantage ($)")
 st.pyplot(fig)
 
 st.caption(
-    "Notes: Margin investing is risky and can trigger margin calls; this model does not simulate margin calls. "
-    "To be more decision-grade, add mortgage paydown differences, selling costs, taxes, and refinance timing."
+    "Interpretation: Above 0 means DFA + investing wins; below 0 means self down payment wins. "
+    "This model does not include mortgage amortization/interest, selling costs, taxes, PMI differences, or refinance timing."
 )
